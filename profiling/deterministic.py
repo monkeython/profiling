@@ -15,34 +15,34 @@ except ImportError:
         thread = importlib.import_module('_thread')
     except ImportError:
         try:
-            thread = importlib.import_module('_dummy_thread')
-        except ImportError:
             thread = importlib.import_module('dummy_thread')
+        except ImportError:
+            thread = importlib.import_module('_dummy_thread')
 
-def _fullname(function):
-    def traverse(obj, name):
-        attributes = dir(obj)
-        if name not in attributes:
-            for attr_name in attributes:
-                if not attr_name.startswith('_'):
-                    attr = getattr(obj, attr_name)
-                    if inspect.isclass(attr):
-                        subpath = traverse(attr, name)
-                        if subpath:
-                            return [attr_name] + subpath
-        else:
-            return [name]
-        return []
-    module = inspect.getmodule(function)
-    function_name = function.__name__
-    if module:
-        subpath = traverse(module, function_name)
-        if not subpath:
-            subpath = [function_name]
-        return '.'.join([module.__name__] + subpath)
-    else:
-        return '.'.join(['None', function_name])
-            
+# def _fullname(function):
+#     def traverse(obj, name):
+#         attributes = dir(obj)
+#         if name not in attributes:
+#             for attr_name in attributes:
+#                 if not attr_name.startswith('_'):
+#                     attr = getattr(obj, attr_name)
+#                     if inspect.isclass(attr):
+#                         subpath = traverse(attr, name)
+#                         if subpath:
+#                             return [attr_name] + subpath
+#         else:
+#             return [name]
+#         return []
+#     module = inspect.getmodule(function)
+#     function_name = function.__name__
+#     if module:
+#         subpath = traverse(module, function_name)
+#         if not subpath:
+#             subpath = [function_name]
+#         return '.'.join([module.__name__] + subpath)
+#     else:
+#         return '.'.join(['None', function_name])
+
 
 class VoidProfiler(object):
     """Pass trough profiler.
@@ -153,11 +153,18 @@ class BasicDeterministicProfiler(_lsprof.Profiler, BasicProfiler):
     """
 
 
+
 class BasicTimeProfiler(BasicProfiler):
     """Basic time profiler.
 
     This profiler just measure the elapsed time using :py:func:`os.times`.
     """
+
+    Entry = collections.namedtuple('Entry',
+                                   ['user_time', 'system_time',
+                                    'children_user_time',
+                                    'children_system_time',
+                                    'real_time'])
 
     def __init__(self, *args, **kwargs):
         self.clear()
@@ -169,7 +176,8 @@ class BasicTimeProfiler(BasicProfiler):
     def disable(self):
         if self._times is not None:
             begin, self._times = self._times, None
-            self._stats.append(tuple(e - b for e, b in zip(os.times(), begin)))
+            entry = self.Entry(*[e - b for e, b in zip(os.times(), begin)])
+            self._stats.append(entry)
         
     def getstats(self):
         return list(self._stats)
@@ -203,7 +211,6 @@ class DeterministicProfiler(object):
         ...
         """
         def decorator(f):
-            f_name = _fullname(f)
             @functools.wraps(f)
             def wrapper(*f_args, **f_kwargs):
                 this_thread = thread.get_ident()
@@ -234,47 +241,47 @@ class DeterministicProfiler(object):
     def collect(self):
         with self._collecting:
             collected, self._stats = self._stats, dict()
-        return {self.__class__: collected.items()}
+        return (self.profiler_class, tuple(collected.items()))
 
 
-# Times = collections.namedtuple('Times', ['user_time',
-#                                          'system_time',
-#                                          'children_user_time',
-#                                          'children_system_time',
-#                                          'real_time'])
+def collect(profiler):
 
-# def create_stats(self):
-#     self.disable()
-#     entries = self.getstats()
-#     self._stats = {}
-#     callersdicts = {}
-#     # call information
-#     for entry in entries:
-#         func = label(entry.code)
-#         nc = entry.callcount         # ncalls column of pstats (before '/')
-#         cc = nc - entry.reccallcount # ncalls column of pstats (after '/')
-#         tt = entry.inlinetime        # tottime column of pstats
-#         ct = entry.totaltime         # cumtime column of pstats
-#         callers = {}
-#         callersdicts[id(entry.code)] = callers
-#         self.stats[func] = cc, nc, tt, ct, callers
-#     # subcall information
-#     for entry in entries:
-#         if entry.calls:
-#             func = label(entry.code)
-#             for subentry in entry.calls:
-#                 try:
-#                     callers = callersdicts[id(subentry.code)]
-#                 except KeyError:
-#                     continue
-#                 nc = subentry.callcount
-#                 cc = nc - subentry.reccallcount
-#                 tt = subentry.inlinetime
-#                 ct = subentry.totaltime
-#                 if func in callers:
-#                     prev = callers[func]
-#                     nc += prev[0]
-#                     cc += prev[1]
-#                     tt += prev[2]
-#                     ct += prev[3]
-#                 callers[func] = nc, cc, tt, ct
+    def label(code):
+        if isinstance(code, str):
+            # built-in functions ('~' sorts at the end)
+            return ('~', 0, code)
+        else:
+            return (code.co_filename, code.co_firstlineno, code.co_name)
+    
+    profiler_class , collected_items = profiler.collect()
+    for function, entries in collected_items:
+        callersdicts = {}
+        # call information
+        for entry in entries:
+            name = label(entry.code)
+            nc = entry.callcount         # ncalls column of pstats (before '/')
+            cc = nc - entry.reccallcount # ncalls column of pstats (after '/')
+            tt = entry.inlinetime        # tottime column of pstats
+            ct = entry.totaltime         # cumtime column of pstats
+            callersdicts[id(entry.code)] = callers = {}
+            stats[name] = cc, nc, tt, ct, callers
+        # subcall information
+        for entry in entries:
+            if entry.calls:
+                name = label(entry.code)
+                for subentry in entry.calls:
+                    try:
+                        callers = callersdicts[id(subentry.code)]
+                    except KeyError:
+                        continue
+                    nc = subentry.callcount
+                    cc = nc - subentry.reccallcount
+                    tt = subentry.inlinetime
+                    ct = subentry.totaltime
+                    if name in callers:
+                        prev = callers[name]
+                        nc += prev[0]
+                        cc += prev[1]
+                        tt += prev[2]
+                        ct += prev[3]
+                    callers[name] = nc, cc, tt, ct
